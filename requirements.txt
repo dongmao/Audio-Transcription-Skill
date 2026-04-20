@@ -1,0 +1,8 @@
+qwen-asr
+modelscope
+librosa
+soundfile
+yt-dlp
+playwright
+requests
+torch
