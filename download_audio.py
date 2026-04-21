@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
 """
-音频下载脚本 - 统一入口
+音频下载脚本 - 统一入口（跨平台版本）
 支持来源：
   1. B站视频/直播 → yt-dlp
-  2. 网盘分享（极空间/百度/阿里云盘等）→ Playwright + 系统 Edge
+  2. 网盘分享（极空间/百度/阿里云盘等）→ Playwright + 系统浏览器
   3. HTTP/HTTPS 直链 → requests
+
+跨平台特性：
+  - 自动检测操作系统（Windows/macOS/Linux）
+  - 根据平台选择最佳工具（curl/curl.exe, 浏览器通道等）
+  - 兼容 Apple Silicon 和 Intel 架构
 
 使用方法：
   python download_audio.py <URL> -o <输出文件名>
@@ -17,6 +22,24 @@ import argparse
 import time
 import re
 import subprocess
+import platform
+
+
+def get_platform_info() -> dict:
+    """获取平台信息"""
+    system = platform.system().lower()
+    arch = platform.machine().lower()
+    
+    return {
+        "system": system,
+        "arch": arch,
+        "is_windows": system == "windows",
+        "is_macos": system == "darwin",
+        "is_linux": system == "linux",
+        "is_apple_silicon": system == "darwin" and arch in ["arm64", "aarch64"],
+        "python_version": platform.python_version(),
+        "python_executable": sys.executable
+    }
 
 
 def detect_source_type(url: str) -> str:
@@ -78,7 +101,7 @@ def download_direct(url: str, output: str, timeout: int = 600) -> bool:
     try:
         import requests
     except ImportError:
-        print("[直链] requests 未安装，尝试 curl.exe ...")
+        print("[直链] requests 未安装，尝试 curl ...")
         return download_curl(url, output, timeout)
     
     try:
@@ -104,15 +127,23 @@ def download_direct(url: str, output: str, timeout: int = 600) -> bool:
     except Exception as e:
         print(f"[直链] 下载失败: {e}")
         # 回退到 curl
-        print("[直链] 尝试 curl.exe ...")
+        print("[直链] 尝试 curl ...")
         return download_curl(url, output, timeout)
 
 
 def download_curl(url: str, output: str, timeout: int = 600) -> bool:
-    """使用系统 curl.exe 下载（Windows 回退方案）"""
+    """使用系统 curl 下载（跨平台回退方案）"""
+    platform_info = get_platform_info()
+    
+    # 根据平台选择 curl 命令
+    if platform_info["is_windows"]:
+        curl_cmd = "curl.exe"
+    else:
+        curl_cmd = "curl"
+    
     try:
         result = subprocess.run(
-            ['curl.exe', '-L', '-o', output, url],
+            [curl_cmd, '-L', '-o', output, url],
             timeout=timeout, capture_output=True, text=True
         )
         if result.returncode == 0 and os.path.exists(output):
@@ -123,7 +154,7 @@ def download_curl(url: str, output: str, timeout: int = 600) -> bool:
             print(f"[curl] 下载失败: {result.stderr[-300:] if result.stderr else '未知错误'}")
             return False
     except FileNotFoundError:
-        print("[curl] curl.exe 不可用")
+        print(f"[curl] {curl_cmd} 不可用")
         return False
     except subprocess.TimeoutExpired:
         print(f"[curl] 下载超时 ({timeout}s)")
@@ -131,7 +162,7 @@ def download_curl(url: str, output: str, timeout: int = 600) -> bool:
 
 
 def download_netdisk(url: str, output: str, timeout: int = 600) -> bool:
-    """使用 Playwright + 系统 Edge 浏览器下载网盘文件"""
+    """使用 Playwright + 系统浏览器下载网盘文件"""
     print(f"[网盘] 启动浏览器下载: {url}")
     
     try:
@@ -140,27 +171,46 @@ def download_netdisk(url: str, output: str, timeout: int = 600) -> bool:
         print("[网盘] playwright 未安装，请运行: pip install playwright")
         return False
     
-    # 确保 Edge 可用
-    edge_paths = [
-        r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
-        r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
-    ]
-    edge_found = any(os.path.exists(p) for p in edge_paths)
-    if not edge_found:
-        print("[网盘] 未找到 Microsoft Edge 浏览器")
-        print("  请安装 Edge 或使用其他下载方式")
-        return False
-    
     output_dir = os.path.dirname(os.path.abspath(output))
     output_name = os.path.basename(output)
     downloaded_file = None
     
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(
-                channel="msedge",
-                headless=False,  # 网盘页面需要可见窗口交互
-            )
+            platform_info = get_platform_info()
+            
+            # 跨平台浏览器启动策略
+            browser = None
+            launch_options = {"headless": False}
+            
+            # 尝试使用系统浏览器通道
+            if platform_info["is_windows"]:
+                # Windows: 优先尝试 Edge
+                try:
+                    browser = p.chromium.launch(channel="msedge", **launch_options)
+                    print("[网盘] 使用系统 Microsoft Edge 浏览器")
+                except Exception:
+                    pass
+            elif platform_info["is_macos"]:
+                # macOS: 优先尝试 Chrome
+                try:
+                    browser = p.chromium.launch(channel="chrome", **launch_options)
+                    print("[网盘] 使用系统 Google Chrome 浏览器")
+                except Exception:
+                    pass
+            elif platform_info["is_linux"]:
+                # Linux: 优先尝试 Chromium
+                try:
+                    browser = p.chromium.launch(channel="chromium", **launch_options)
+                    print("[网盘] 使用系统 Chromium 浏览器")
+                except Exception:
+                    pass
+            
+            # 如果系统浏览器不可用，回退到默认 Chromium
+            if not browser:
+                browser = p.chromium.launch(**launch_options)
+                print("[网盘] 使用 Playwright Chromium 浏览器")
+            
             context = browser.new_context(accept_downloads=True)
             page = context.new_page()
             
@@ -242,7 +292,7 @@ def download_netdisk(url: str, output: str, timeout: int = 600) -> bool:
 
 
 def verify_audio(filepath: str) -> dict:
-    """验证音频文件信息"""
+    """验证音频文件信息（跨平台）"""
     info = {"exists": False, "size_mb": 0, "duration_sec": 0}
     
     if not os.path.exists(filepath):
@@ -252,15 +302,25 @@ def verify_audio(filepath: str) -> dict:
     info["size_mb"] = os.path.getsize(filepath) / 1024 / 1024
     
     # 尝试获取时长
+    platform_info = get_platform_info()
+    
+    # 根据平台选择 ffprobe 命令
+    if platform_info["is_windows"]:
+        ffprobe_cmd = "ffprobe.exe"
+    else:
+        ffprobe_cmd = "ffprobe"
+    
     try:
         result = subprocess.run(
-            ['ffprobe', '-i', filepath,
+            [ffprobe_cmd, '-i', filepath,
              '-show_entries', 'format=duration',
              '-v', 'quiet', '-of', 'csv=p=0'],
             capture_output=True, text=True, timeout=10
         )
         if result.returncode == 0 and result.stdout.strip():
             info["duration_sec"] = float(result.stdout.strip())
+    except FileNotFoundError:
+        print(f"[验证] {ffprobe_cmd} 不可用，无法获取音频时长")
     except Exception:
         pass
     
@@ -268,8 +328,16 @@ def verify_audio(filepath: str) -> dict:
 
 
 def main():
+    # 显示平台信息
+    platform_info = get_platform_info()
+    print(f"[平台] 操作系统: {platform_info['system']} ({platform_info['arch']})")
+    print(f"[平台] Python: {platform_info['python_version']}")
+    if platform_info['is_apple_silicon']:
+        print(f"[平台] 设备: Apple Silicon")
+    print()
+    
     parser = argparse.ArgumentParser(
-        description="音频下载脚本 - 支持 B站/网盘/直链",
+        description="音频下载脚本 - 支持 B站/网盘/直链（跨平台）",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:

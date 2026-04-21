@@ -47,29 +47,51 @@ def format_timestamp(seconds):
 
 
 def detect_device(user_device=None):
-    """自动检测最优推理设备"""
+    """自动检测最优推理设备（跨平台：XPU/CUDA/MPS/CPU）"""
     if user_device:
         return user_device
 
-    # Intel XPU (Arc GPU)
+    # 显示平台信息
+    import platform
+    system = platform.system()
+    arch = platform.machine()
+    print(f"[平台] 操作系统: {system} ({arch})")
+    
+    # 检测优先级：XPU -> CUDA -> MPS -> CPU
+    device_priority = []
+    
+    # 1. Intel XPU (Arc GPU)
     if hasattr(torch, 'xpu') and torch.xpu.is_available():
         name = torch.xpu.get_device_name(0)
-        print(f"[设备] Intel XPU 可用: {name}")
-        return "xpu:0"
-
-    # NVIDIA CUDA
+        vram = torch.xpu.get_device_properties(0).total_memory / 1024**3
+        print(f"[设备] Intel XPU 可用: {name} ({vram:.1f}GB VRAM)")
+        device_priority.append(("xpu:0", f"Intel XPU GPU ({name})"))
+    
+    # 2. NVIDIA CUDA
     if torch.cuda.is_available():
         name = torch.cuda.get_device_name(0)
         vram = torch.cuda.get_device_properties(0).total_mem / 1024**3
-        print(f"[设备] CUDA GPU 可用: {name} ({vram:.1f}GB VRAM)")
-        return "cuda:0"
-
+        print(f"[设备] NVIDIA CUDA 可用: {name} ({vram:.1f}GB VRAM)")
+        device_priority.append(("cuda:0", f"NVIDIA CUDA GPU ({name})"))
+    
+    # 3. Apple MPS (Apple Silicon)
+    if system == "Darwin" and arch in ["arm64", "aarch64"]:
+        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            print(f"[设备] Apple MPS 可用: Apple Silicon GPU")
+            device_priority.append(("mps", "Apple Silicon MPS GPU"))
+    
+    # 选择最佳设备
+    if device_priority:
+        device, description = device_priority[0]
+        print(f"[设备] 选择: {description}")
+        return device
+    
     print("[设备] ⚠ GPU 不可用，使用 CPU（速度较慢）")
     return "cpu"
 
 
 def estimate_batch_size(device):
-    """根据设备估算批次大小"""
+    """根据设备估算批次大小（跨平台）"""
     if "xpu" in device:
         try:
             vram = torch.xpu.get_device_properties(0).total_memory / 1024**3
@@ -92,6 +114,19 @@ def estimate_batch_size(device):
                 return 4
         except Exception:
             return 8
+    elif device == "mps":
+        # Apple MPS 内存通常统一，保守估计
+        try:
+            import psutil
+            total_memory = psutil.virtual_memory().total / 1024**3
+            if total_memory >= 16:
+                return 8
+            elif total_memory >= 8:
+                return 4
+            else:
+                return 2
+        except Exception:
+            return 4  # 默认值
     return 4  # CPU
 
 
@@ -270,12 +305,30 @@ def main():
     print(f"[模型] 模型路径: {model_dir}")
 
     from qwen_asr import Qwen3ASRModel
-    dtype = torch.float16 if device != "cpu" else torch.float32
-
+    
+    # 设备类型映射和配置
+    device_config = {
+        "xpu:0": {"dtype": torch.float16, "device_map": "xpu:0"},
+        "cuda:0": {"dtype": torch.float16, "device_map": "cuda:0"},
+        "mps": {"dtype": torch.float16, "device_map": "mps"},
+        "cpu": {"dtype": torch.float32, "device_map": "cpu"},
+    }
+    
+    # 获取设备配置
+    config = device_config.get(device, device_config["cpu"])
+    dtype = config["dtype"]
+    device_map = config["device_map"]
+    
+    # 特殊处理：MPS 设备可能不支持某些特性
+    if device == "mps":
+        print(f"[设备] Apple MPS 模式激活，使用兼容配置")
+        # MPS 可能需要 float32 以获得更好兼容性
+        dtype = torch.float32
+    
     model = Qwen3ASRModel.from_pretrained(
         model_dir,
         dtype=dtype,
-        device_map=device,
+        device_map=device_map,
         max_inference_batch_size=32,
         max_new_tokens=args.max_new_tokens,
     )
