@@ -13,7 +13,7 @@
 | 📝 **精炼版整理** | 按主题重组 + 口语清理 + 信息分层 + 关键数据速览 |
 | 🔗 **智能重叠去重** | 分片尾部 5s 重叠，避免句子断裂，自动拼接 |
 | ♻️ **断点续传** | 长音频中断后可继续，不重复劳动 |
-| ⚡ **全平台 GPU** | Intel XPU (Arc) / NVIDIA CUDA 自动检测，禁止 CPU 推理 |
+| ⚡ **全平台 GPU** | Intel XPU (Arc) / NVIDIA CUDA / Apple MPS，自动检测 |
 | 🇨🇳 **国内镜像** | ModelScope 下载模型，阿里云 PyPI 镜像安装依赖 |
 | ✅ **完整性验证** | 自动检查覆盖率、失败率，确保无遗漏 |
 
@@ -41,16 +41,16 @@
 ### 环境要求
 
 - Python 3.10+
-- GPU（Intel Arc / NVIDIA，**禁止纯 CPU 推理**）
+- GPU（Intel Arc / NVIDIA CUDA / Apple MPS，**禁止纯 CPU 推理**）
 - ffmpeg
-- Microsoft Edge 浏览器（网盘下载用）
+- Microsoft Edge 浏览器（网盘下载用，macOS 使用系统浏览器）
 
 ### 安装
 
 ```bash
 # 1. 克隆仓库
-git clone https://github.com/dongmao/audio-transcription.git
-cd audio-transcription
+git clone https://github.com/dongmao/Audio-Transcription-Skill.git
+cd Audio-Transcription-Skill
 
 # 2. 安装 Python 依赖（阿里云镜像）
 pip install -r requirements.txt -i https://mirrors.aliyun.com/pypi/simple/
@@ -87,13 +87,13 @@ python -c "from playwright.sync_api import sync_playwright; print('playwright OK
 
 ```bash
 # B站视频
-python scripts/download_audio.py "https://www.bilibili.com/video/BV1xwQtBjEN1" -o "output.mp3"
+python download_audio.py "https://www.bilibili.com/video/BV1xwQtBjEN1" -o "output.mp3"
 
 # 极空间/百度网盘分享（自动启动 Edge 浏览器）
-python scripts/download_audio.py "https://t3.znas.cn/xxxxx" -o "output.mp3"
+python download_audio.py "https://t3.znas.cn/xxxxx" -o "output.mp3"
 
 # HTTP 直链
-python scripts/download_audio.py "https://example.com/audio.mp3" -o "output.mp3"
+python download_audio.py "https://example.com/audio.mp3" -o "output.mp3"
 
 # 本地文件（直接跳过下载步骤）
 ```
@@ -102,16 +102,19 @@ python scripts/download_audio.py "https://example.com/audio.mp3" -o "output.mp3"
 
 ```bash
 # 基本用法（自动检测 GPU）
-python scripts/transcribe_qwen3_asr.py "output.mp3"
+python transcribe_qwen3_asr.py "output.mp3"
 
 # 指定 Intel XPU
-python scripts/transcribe_qwen3_asr.py "output.mp3" -d "xpu:0"
+python transcribe_qwen3_asr.py "output.mp3" -d "xpu:0"
 
 # 指定 NVIDIA CUDA
-python scripts/transcribe_qwen3_asr.py "output.mp3" -d "cuda:0"
+python transcribe_qwen3_asr.py "output.mp3" -d "cuda:0"
+
+# 指定 Apple MPS
+python transcribe_qwen3_asr.py "output.mp3" -d "mps"
 
 # 自定义分片和输出
-python scripts/transcribe_qwen3_asr.py "output.mp3" -s 25 --overlap 3 -o "转录结果.txt"
+python transcribe_qwen3_asr.py "output.mp3" -s 25 --overlap 3 -o "转录结果.txt"
 ```
 
 **转录参数：**
@@ -134,11 +137,12 @@ python scripts/transcribe_qwen3_asr.py "output.mp3" -s 25 --overlap 3 -o "转录
 |------|---------|---------|--------|
 | Intel Arc 140V (16GB) | 59min | 3.1min | ~19x |
 | NVIDIA RTX 4090 | 59min | ~3min | ~20x |
+| Apple M1/M2/M3 (MPS) | 59min | ~8-12min | ~5-7x |
 | CPU (i7) | 59min | ~60min | ~1x ⚠️ |
 
 ### Step 3: 生成精炼版
 
-将原始转录交给 AI 整理为精炼版。详细方法论见 [`references/精炼版整理指南.md`](references/精炼版整理指南.md)。
+将原始转录交给 AI 整理为精炼版。详细方法论见 [`精炼版整理指南.md`](精炼版整理指南.md)。
 
 **核心原则：**
 
@@ -170,20 +174,15 @@ python scripts/transcribe_qwen3_asr.py "output.mp3" -s 25 --overlap 3 -o "转录
 ## 📂 项目结构
 
 ```
-audio-transcription/
-├── README.md                          # 本文件
-├── SKILL.md                           # WorkBuddy Skill 描述文件
-├── requirements.txt                   # Python 依赖
+Audio-Transcription-Skill/
+├── README.md                       # 本文件
+├── SKILL.md                        # WorkBuddy Skill 描述文件（本地安装时放在 ~/.workbuddy/skills/audio-transcription/）
+├── requirements.txt                 # Python 依赖
 ├── .gitignore
-├── LICENSE                            # MIT License
-│
-├── scripts/
-│   ├── download_audio.py              # 音频下载脚本（B站/网盘/直链）
-│   └── transcribe_qwen3_asr.py        # Qwen3-ASR 转录脚本
-│
-└── references/
-    ├── 精炼版整理指南.md               # 精炼版整理完整方法论 + Prompt 模板
-    └── 精炼版示例.md                   # 实际精炼版样本，供学习参考
+├── LICENSE                         # MIT License
+├── download_audio.py               # 音频下载脚本（B站/网盘/直链）
+├── transcribe_qwen3_asr.py         # Qwen3-ASR 转录脚本
+└── 精炼版整理指南.md                # 精炼版整理完整方法论 + Prompt 模板
 ```
 
 ## 🔧 技术细节
@@ -205,7 +204,7 @@ audio-transcription/
 
 ```bash
 # 中断后恢复——输出路径一致，自动读取 checkpoint
-python scripts/transcribe_qwen3_asr.py "output.mp3" -o "之前的输出.txt"
+python transcribe_qwen3_asr.py "output.mp3" -o "之前的输出.txt"
 ```
 
 ### 网盘下载原理
@@ -239,6 +238,8 @@ with sync_playwright() as p:
 | ffmpeg 未找到 | `winget install ffmpeg` |
 | GPU 不可用 (Intel) | `pip install intel-extension-for-pytorch -i https://mirrors.aliyun.com/pypi/simple/` |
 | GPU 不可用 (NVIDIA) | `pip install torch --index-url https://download.pytorch.org/whl/cu121` |
+| GPU 不可用 (Apple MPS) | 确保 PyTorch ≥ 2.0，macOS ≥ 12.3，Apple Silicon Mac |
+| ffmpeg 未找到 (macOS) | `brew install ffmpeg` |
 | Playwright 网盘下载失败 | 确认有 Edge 浏览器，使用 `channel="msedge"` |
 | 模型下载慢/失败 | 使用 ModelScope 镜像：`modelscope download Qwen/Qwen3-ASR-1.7B` |
 | 转录中断 | 直接重新运行相同命令，自动从 checkpoint 恢复 |
@@ -246,9 +247,10 @@ with sync_playwright() as p:
 
 ## ⚠️ 重要规则
 
-- **必须用 GPU 转录**，禁止纯 CPU 跑大模型推理任务
+- **必须用 GPU 转录**，禁止纯 CPU 跑大模型推理任务（Intel Arc / NVIDIA CUDA / Apple MPS）
 - **所有依赖和模型必须用国内镜像下载**，禁止翻墙
 - Intel Arc GPU 用 IPEX (`intel-extension-for-pytorch`)，不是 CUDA
+- Apple Silicon Mac 用 MPS 加速，确保 PyTorch ≥ 2.0
 - pip 镜像：`https://mirrors.aliyun.com/pypi/simple/`
 - 模型镜像：[ModelScope](https://modelscope.cn)，不用 HuggingFace
 

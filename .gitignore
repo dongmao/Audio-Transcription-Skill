@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.whl
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Checkpoints / outputs
+*_Qwen3ASR.txt
+*_Qwen3ASR.md
+*_精炼版.md
+*_原始转录.md
+*.checkpoint.json
+checkpoint_*.json
+
+# Audio (don't commit downloaded files)
+*.mp3
+*.wav
+*.m4a
+*.flac
+*.ogg
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Model files (downloaded at runtime)
+Qwen/
+models/
+
+# IDE
+.vscode/
+.idea/
