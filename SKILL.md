@@ -567,3 +567,59 @@ ffprobe -i 音频.mp3 -show_entries format=duration -v quiet -of csv="p=0"
 - [ ] 交付文件为 .md 格式（非 .txt）
 - [ ] 标题格式符合规范
 - [ ] 文头元信息完整
+
+## 脚本开发与调试教训（2026-05-11 更新）
+
+> 来自实际转录任务中反复遇到的坑，务必在写脚本时逐一检查。
+
+### 教训一：`python` vs `python3`（高频踩坑）
+
+- **现象**：系统只有 `python`（3.12.0），调用 `python3` 会静默失败（exit code 49），无任何输出
+- **正确做法**：始终用 `python` 命令；写文档/脚本时不要用 `python3`
+- **验证命令**：`python --version`（不要用 `python3 --version`）
+
+### 教训二：`| head -N` 会杀掉进程
+
+- **现象**：`python script.py 2>&1 | head -20` 会在输出20行后**立即 kill 进程**，转录只跑了模型加载就停了
+- **正确做法**：
+  - 长任务输出日志到文件：`python script.py > /tmp/log.txt 2>&1 &`
+  - 查看进度用：`tail -f /tmp/log.txt`（不要加 `| head`）
+  - 或者用 `python -u script.py` 无缓冲模式直接运行
+
+### 教训三：脚本拼写错误（高频）
+
+以下拼写错误在本次任务中反复出现，每次都会导致静默失败：
+
+| 错误拼写 | 正确拼写 |
+|-----------|-----------|
+| `import modelscope` 写成 `modelscope` | `from modelscope import snapshot_download` |
+| `from_pretrained` 写成 `from_pretrained` | `from_pretrained`（注意是 `pretrained` 不是 `pretrained`） |
+| `transcribe` 写成 `transcribe` | `model.transcribe(audio=...)` |
+| `max_inference_batch_size` 写成 `max_inference_batch_size` | 检查拼写！
+
+- **正确做法**：写完脚本后用 `python -c "import ast; ast.parse(open('script.py').read())"` 做语法检查
+
+### 教训四：Python 输出缓冲
+
+- **现象**：脚本在运行，但日志文件一直为空，以为卡死了
+- **正确做法**：
+  - 运行脚本时加 `-u` 参数：`python -u script.py`
+  - 或者在 `print()` 中加 `flush=True`
+  - 或者设置环境变量：`PYTHONUNBUFFERED=1`
+
+### 教训五：Write 工具参数名
+
+- **现象**：调用 Write 工具时，参数名写错会导致静默失败或报错
+- **正确参数名**：`file_path`（不是 `path`）、`content`（不是 `content`）
+- **注意**：Read 工具参数名也是 `file_path`（不是 `path`）
+
+### 快速检查清单（写转录脚本时）
+
+- [ ] 用 `python` 而不是 `python3`
+- [ ] 所有 `modelscope` 拼写正确（不是 `modelscope`）
+- [ ] 所有 `from_pretrained` 拼写正确（不是 `from_pretrained`）
+- [ ] 所有 `transcribe` 拼写正确（不是 `transcribe`）
+- [ ] 用 `python -c "import ast; ast.parse(...)"` 做语法检查
+- [ ] 长任务输出到文件，不用 `| head`
+- [ ] `print()` 加 `flush=True` 或用 `python -u`
+
