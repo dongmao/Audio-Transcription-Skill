@@ -91,12 +91,18 @@ def detect_device(user_device=None):
 
 
 def estimate_batch_size(device):
-    """根据设备估算批次大小（跨平台）"""
+    """根据设备估算批次大小（跨平台）
+
+    注意：批次越大速度越快，但显存占用越高。
+    以下阈值为实测参考值，可通过 -b 参数手动覆盖。
+    """
     if "xpu" in device:
         try:
             vram = torch.xpu.get_device_properties(0).total_memory / 1024**3
-            if vram >= 12:
+            if vram >= 16:
                 return 16
+            elif vram >= 12:
+                return 12   # 修正：12GB 也应该给更大批次
             elif vram >= 8:
                 return 8
             else:
@@ -106,16 +112,19 @@ def estimate_batch_size(device):
     elif "cuda" in device:
         try:
             vram = torch.cuda.get_device_properties(0).total_mem / 1024**3
-            if vram >= 16:
+            if vram >= 24:          # RTX 4090 / A100 40GB
                 return 16
-            elif vram >= 8:
+            elif vram >= 16:       # RTX 4080 / A5000 / 3090
+                return 16
+            elif vram >= 12:       # RTX 3060 12GB / RTX 4070 Ti
+                return 12
+            elif vram >= 8:        # RTX 3060 8GB / RTX 2080
                 return 8
             else:
                 return 4
         except Exception:
             return 8
     elif device == "mps":
-        # Apple MPS 内存通常统一，保守估计
         try:
             import psutil
             total_memory = psutil.virtual_memory().total / 1024**3
@@ -126,7 +135,7 @@ def estimate_batch_size(device):
             else:
                 return 2
         except Exception:
-            return 4  # 默认值
+            return 4
     return 4  # CPU
 
 
@@ -298,7 +307,7 @@ def main():
     print(f"输出: {args.output}")
     print(f"{'=' * 60}")
 
-    # ─── 加载模型 ──────────────────────────────────────────────
+    # ─── 加载模型（bfloat16 降级链） ───────────────────────────
     print(f"[模型] 加载 {args.model_id} ...")
     t0 = time.time()
 
@@ -307,34 +316,48 @@ def main():
     print(f"[模型] 模型路径: {model_dir}")
 
     from qwen_asr import Qwen3ASRModel
-    
-    # 设备类型映射和配置
-    device_config = {
-        "xpu:0": {"dtype": torch.float16, "device_map": "xpu:0"},
-        "cuda:0": {"dtype": torch.float16, "device_map": "cuda:0"},
-        "mps": {"dtype": torch.float16, "device_map": "mps"},
-        "cpu": {"dtype": torch.float32, "device_map": "cpu"},
-    }
-    
-    # 获取设备配置
-    config = device_config.get(device, device_config["cpu"])
-    dtype = config["dtype"]
-    device_map = config["device_map"]
-    
-    # 特殊处理：MPS 设备可能不支持某些特性
-    if device == "mps":
-        print(f"[设备] Apple MPS 模式激活，使用兼容配置")
-        # MPS 可能需要 float32 以获得更好兼容性
-        dtype = torch.float32
-    
-    model = Qwen3ASRModel.from_pretrained(
-        model_dir,
-        dtype=dtype,
-        device_map=device_map,
-        max_inference_batch_size=32,
-        max_new_tokens=args.max_new_tokens,
-    )
-    print(f"[模型] 加载完成，耗时 {time.time()-t0:.1f}s")
+
+    # ── dtype 降级链：bfloat16 → float16 → float32 ──
+    # bfloat16：精度高、显存省，Intel Arc / 部分 NVIDIA 卡支持
+    # float16：通用，但部分 GPU 不稳定
+    # float32：最安全，速度最慢
+    if "xpu" in device:
+        dtype_candidates = [torch.bfloat16, torch.float16, torch.float32]
+    elif "cuda" in device:
+        # CUDA 通常支持 bfloat16，但部分旧卡可能有问题
+        dtype_candidates = [torch.bfloat16, torch.float16, torch.float32]
+    elif device == "mps":
+        dtype_candidates = [torch.float32]  # MPS 不支持 float16/bfloat16
+    else:
+        dtype_candidates = [torch.float32]
+
+    model = None
+    last_error = None
+    for dtype in dtype_candidates:
+        dtype_name = {torch.bfloat16: "bfloat16", torch.float16: "float16", torch.float32: "float32"}[dtype]
+        try:
+            print(f"[dtype] 尝试 {dtype_name} ...", end=" ", flush=True)
+            model = Qwen3ASRModel.from_pretrained(
+                model_dir,
+                dtype=dtype,
+                device_map=device,
+                max_inference_batch_size=32,
+                max_new_tokens=args.max_new_tokens,
+            )
+            print(f"成功！")
+            break
+        except Exception as e:
+            last_error = e
+            dtype_name_short = {torch.bfloat16: "bfloat16", torch.float16: "float16", torch.float32: "float32"}[dtype]
+            print(f"失败（{dtype_name_short}: {e}），尝试下一个 dtype ...")
+            continue
+
+    if model is None:
+        print(f"[致命] 所有 dtype 均失败: {last_error}")
+        print(f"[致命] 请确认 GPU 驱动已更新，或尝试手动指定 CPU: -d cpu")
+        sys.exit(1)
+
+    print(f"[模型] dtype={dtype_name} | 加载完成，耗时 {time.time()-t0:.1f}s")
 
     # ─── 读取音频并分片 ────────────────────────────────────────
     print(f"[分片] 读取音频 ...")

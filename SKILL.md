@@ -60,9 +60,10 @@ description: >
 │  Phase 3: 转录（Qwen3-ASR，必须 GPU）                             │
 │  → 智能分片：30s片长 + 5s重叠                                    │
 │  → GPU加速批量推理（自动调批次大小）                              │
+│  → dtype 降级链：bfloat16 → float16 → float32（自动）           │
 │  → 断点续传：checkpoint.json 记录进度                            │
 │  → 重叠去重：自动拼接，避免句子断裂                              │
-│  → 失败降级：批次失败→逐条重试                                   │
+│  → 失败降级：批次失败→逐条重试（已内置）                         │
 │                                                                  │
 │  Phase 4: 整理精炼版（AI 核心）                                   │
 │  → 按主题重组章节，标注时间锚定                                   │
@@ -887,4 +888,67 @@ python transcribe_qwen3_asr.py "录音.mp3" -o "录音_qwen3asr.txt"
 1. 写完 SKILL.md 后，用 `ls skill目录/` 和 `ls skill目录/scripts/` 验证所有脚本路径
 2. 文档中的路径必须与实际文件位置一一对应，不能假设"都在 scripts/ 下"
 3. 脚本结构应尽量统一（建议全部放在 scripts/ 下，或全部放在根目录），避免混淆
+
+### 教训十：dtype 降级链——其他 agent 达不到 20x 的根因（⭐ 2026-05-15 新增）
+
+> **现象**：其他 agent 安装 skill 后，转录速度往往只有 2-5x，远低于 20x 目标。
+
+**根因分析**：
+
+| 根因 | 错误做法 | 正确做法 |
+|------|---------|---------|
+| **XPU dtype 硬编码 float16** | Intel Arc 用 float16，batch 稍大就 OOM → 降级逐条推理 | 用 **bfloat16**（显存省、精度高），降级链：bfloat16 → float16 → float32 |
+| **batch_size 阈值偏高** | RTX 3060 12GB 只给 batch=8 | RTX 3060 12GB → batch=12；RTX 4090 24GB → batch=16 |
+| **dtype 失败无降级** | float16 OOM → 直接崩溃或静默退 CPU | 必须有 bfloat16/float16/float32 三级降级链，优雅切换 |
+
+**transcribe_qwen3_asr.py 中的 dtype 降级链（实测 2026-05-15）**：
+
+```python
+# 设备对应 dtype 降级优先级
+xpu   → bfloat16 → float16 → float32
+cuda  → bfloat16 → float16 → float32
+mps   → float32  （MPS 不支持 float16/bfloat16）
+cpu   → float32  （唯一选择）
+```
+
+**速度对比参考**：
+
+| 设备 | dtype | batch_size | 预计实时率 |
+|------|-------|-----------|-----------|
+| Intel Arc 140V 16GB | bfloat16 | 16 | **~17-22x** ✅ |
+| Intel Arc 140V 16GB | float16 | 16 | ~5-10x（不稳定，可能 OOM） |
+| Intel Arc 140V 16GB | float32 | 4 | ~2-3x |
+| RTX 4090 24GB | bfloat16 | 16 | ~20x |
+| RTX 3060 12GB | bfloat16 | 12 | ~10-15x |
+| RTX 3060 8GB | float16 | 8 | ~5-8x（受限） |
+| CPU (i7) | float32 | 1 | ~1x ⚠️ |
+
+**验证命令**：
+```bash
+# 查看当前 dtype 设置
+python transcribe_qwen3_asr.py "录音.mp3" -o "输出.txt" 2>&1 | grep -E "dtype|批次|实时率"
+```
+
+### 教训十一：batch_size 显存阈值（⭐ 2026-05-15 新增）
+
+**现象**：batch_size 决定每批处理多少个音频片段，越大越快，但受显存限制。
+
+```python
+# NVIDIA CUDA 显存 → batch_size 映射
+RTX 4090 / A100 40GB (≥24GB) → batch=16  ✅
+RTX 4080 / A5000 / 3090  (≥16GB) → batch=16
+RTX 3060 12GB               (≥12GB) → batch=12  # 之前错误给了8
+RTX 3060 8GB / RTX 2080     (≥8GB)  → batch=8
+8GB 以下                    → batch=4
+
+# Intel XPU 显存 → batch_size 映射
+≥16GB → batch=16
+≥12GB → batch=12  # 之前错误给了4
+≥8GB  → batch=8
+```
+
+**手动覆盖**（如果自动估测不准）：
+```bash
+python transcribe_qwen3_asr.py "录音.mp3" -b 16 -d "cuda:0"
+```
 
