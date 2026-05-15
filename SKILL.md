@@ -20,6 +20,7 @@ description: >
 
 - **全来源覆盖**：B站视频、极空间/百度/阿里云盘分享、HTTP直链、本地文件
 - **Qwen3-ASR 转录**：中文识别精度最高，1.7B 小模型 GPU 高效推理
+- **SenseVoice 快速预览**：Phase 2.5a 小模型预览，32秒完成39分钟音频，用于指导精准调研
 - **精炼版整理**：按主题重组 + 口语清理 + 信息分层 + 关键数据速览
 - **智能重叠去重**：分片尾部5s重叠，避免句子断裂，自动拼接
 - **断点续传**：长音频中断后可继续，不重复劳动
@@ -34,7 +35,7 @@ description: >
 ┌──────────────────────────────────────────────────────────────────┐
 │  Phase 1: 环境检测（一次性）                                       │
 │  → 检测 GPU 类型 (Intel XPU / NVIDIA CUDA / Apple MPS / CPU)                 │
-│  → 确认 qwen-asr、modelscope、librosa、playwright 已安装          │
+│  → 确认 qwen-asr、funasr、modelscope、librosa、playwright 已安装          │
 │  → 未安装则用国内镜像 pip install                                 │
 │                                                                  │
 │  Phase 2: 获取音频                                                │
@@ -43,6 +44,18 @@ description: >
 │  → HTTP直链：curl 下载                                           │
 │  → 本地文件：直接使用                                             │
 │  → 记录音频时长用于完整性验证                                     │
+│                                                                  │
+│  ⭐ Phase 2.5a: SenseVoice 快速预览（2026-05-15新增）         │
+│  → 用 SenseVoice-Small (~200M) 快速跑一遍音频                    │
+│  → 32秒完成39分钟音频（~70x实时率），获取全文章内容               │
+│  → 清除特殊标签（<|zh|><|NEUTRAL|><|Speech|>等元数据）         │
+│  → 预览文本用于 Phase 2.5b 精准调研                              │
+│                                                                  │
+│  ⭐ Phase 2.5b: 预览文本驱动的精准调研（2026-05-15新增）       │
+│  → 从 SenseVoice 预览文本中提取陌生词汇/专有名词                  │
+│  → 针对这些词搜索验证（不能盲猜关键词）                            │
+│  → 建立专有名词对照表（ASR可能识别 → 正确名称）                  │
+│  → 此步骤直接影响精炼版准确率，必须认真执行                        │
 │                                                                  │
 │  Phase 3: 转录（Qwen3-ASR，必须 GPU）                             │
 │  → 智能分片：30s片长 + 5s重叠                                    │
@@ -53,6 +66,8 @@ description: >
 │                                                                  │
 │  Phase 4: 整理精炼版（AI 核心）                                   │
 │  → 按主题重组章节，标注时间锚定                                   │
+│  → 对照专有名词表修正ASR识别错误                                  │
+│  → 不确定的标注 [待确认]，末尾附校正表                           │
 │  → 去除口语冗余，保留论证过程                                     │
 │  → 结构化数据用表格，信息分层组织                                 │
 │  → 文头元信息 + 文末关键数据速览                                 │
@@ -70,7 +85,7 @@ description: >
 
 ```bash
 # 核心依赖（阿里云镜像）
-pip install qwen-asr modelscope librosa soundfile yt-dlp playwright requests -i https://mirrors.aliyun.com/pypi/simple/
+pip install qwen-asr funasr modelscope librosa soundfile yt-dlp playwright requests -i https://mirrors.aliyun.com/pypi/simple/
 
 # Playwright 浏览器（网盘下载必需）
 # macOS 不需要额外安装，使用系统浏览器
@@ -89,7 +104,7 @@ brew install ffmpeg
 
 ```bash
 # 检查 GPU（跨平台）
-python3 -c "
+python -c "
 import torch, platform
 print(f'平台: {platform.system()} {platform.machine()}')
 print('XPU:', hasattr(torch,'xpu') and torch.xpu.is_available())
@@ -99,10 +114,13 @@ if platform.system() == 'Darwin' and platform.machine() in ['arm64', 'aarch64']:
 "
 
 # 检查 qwen-asr
-python3 -c "from qwen_asr import Qwen3ASRModel; print('qwen-asr OK')"
+python -c "from qwen_asr import Qwen3ASRModel; print('qwen-asr OK')"
+
+# 检查 funasr（SenseVoice 预览用）
+python -c "import funasr; print('funasr OK:', funasr.__version__)"
 
 # 检查 Playwright
-python3 -c "from playwright.sync_api import sync_playwright; print('playwright OK')"
+python -c "from playwright.sync_api import sync_playwright; print('playwright OK')"
 ```
 
 > **重要规则**：
@@ -120,7 +138,7 @@ python3 -c "from playwright.sync_api import sync_playwright; print('playwright O
 
 ```bash
 # 自动识别来源类型
-python3 scripts/download_audio.py "<URL>" -o "录音.mp3"
+python download_audio.py "<URL>" -o "录音.mp3"
 
 # 支持所有来源：B站、网盘、直链
 # 自动检测来源类型，选择最优下载方式
@@ -164,12 +182,125 @@ ffprobe -i "录音.mp3" -show_entries format=duration,size -v quiet -of csv="p=0
 
 > **重要**：记录实际音频时长，用于后续完整性验证。
 
+## ⭐ Phase 2.5a: SenseVoice 快速预览（必须执行！2026-05-15新增）
+
+> **核心思想**：不要盲猜关键词，而是先"听"一遍内容，再精准调研。
+
+**为什么需要预览？**
+
+| 旧流程问题 | 新流程优势 |
+|-----------|-----------|
+| 根据视频标题猜关键词 | 从实际转录文本提取词汇 |
+| "智元"查不到 → 写错"智源" | 从预览文本找到"志源" → 搜索确认"智元" |
+| "Sharp"搜不到 | 从预览文本找到类似发音 → 搜索确认 |
+| 背景调研依赖预训练知识 | 直接看转录文本，100% 准确 |
+
+**SenseVoice-Small 预览模型**：
+
+| 属性 | 值 |
+|------|------|
+| 模型 | `iic/SenseVoiceSmall`（阿里 FunAudioLLM） |
+| 参数量 | ~200M |
+| 速度（Intel Arc 140V XPU） | **~70x 实时率**，39分钟音频约 32-35 秒 |
+| 速度（CPU） | ~20x 实时率，39分钟约 2 分钟（仍可接受） |
+| 精度 | 优于同等量级 Whisper，但不如 Qwen3-ASR-1.7B |
+| 输出标签 | `<|zh|><|NEUTRAL|><|Speech|>` 等（需清除） |
+
+**运行预览脚本**：
+
+```bash
+# 自动检测设备（XPU/CUDA/CPU）
+python scripts/transcribe_sensevoice.py "录音.mp3" -o "录音_preview.txt"
+
+# 指定设备
+python scripts/transcribe_sensevoice.py "录音.mp3" -d "xpu" -o "录音_preview.txt"
+```
+
+**选项**：
+
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| `-o, --output` | 输出文件路径 | `{原文件名}_SenseVoice_preview.txt` |
+| `-s, --segment-len` | 分片长度（秒） | 30 |
+| `--overlap` | 重叠长度（秒） | 3 |
+| `-d, --device` | 推理设备 | 自动检测 |
+| `--batch-size` | 批次大小 | 8 |
+
+**预览脚本会自动清除特殊标签**（`<|zh|>`、`<|NEUTRAL|>`、`<|Speech|>` 等元数据标签），输出纯净文本。
+
+**性能参考**：
+
+| 设备 | 音频时长 | 预览耗时 | 实时率 |
+|------|---------|---------|--------|
+| Intel Arc 140V (16GB) | 39min | ~32秒 | ~70x |
+| CPU (i7) | 39min | ~2分钟 | ~20x |
+| NVIDIA RTX 4090 | 39min | ~25秒 | ~90x |
+
+## ⭐ Phase 2.5b: 预览文本驱动的精准调研（必须执行！2026-05-15新增）
+
+> **核心思想**：从 SenseVoice 预览文本中提取词汇，而不是盲猜。
+
+### 步骤一：从预览文本提取陌生词汇
+
+读取 `录音_preview.txt`，扫描以下模式：
+
+```
+1. 英文专有名词（连续大写字母）："Pi", "Figure", "Sharp", "RT-1"
+2. 疑似音译的人名/公司名（常见错误模式）：
+   - "志源" → 可能是"智元"（智/志混淆）
+   - "物理智能" → 可能是"Physical Intelligence"
+   - "hi world" → 可能是"AgiBot World"
+   - "group one" → 可能是"Groot One"
+3. 不确定的技术术语
+```
+
+### 步骤二：精准搜索验证
+
+对于每个提取的陌生词汇：
+
+```bash
+# 示例：搜索"志源机器人"确认是否"智元机器人"
+WebSearch: "志源 机器人 具身智能"
+
+# 示例：搜索"hi world 具身智能"确认是否"AgiBot World"
+WebSearch: "AgiBot World 具身智能 数据集"
+
+# 示例：搜索"Sharp 机器人 乒乓球"
+WebSearch: "Sharp Robotics 机器人 乒乓球 CES"
+```
+
+### 步骤三：建立专有名词对照表
+
+```
+ASR预览可能识别    →  正确名称（搜索确认）
+志源               →  智元机器人（人形机器人公司）
+物理智能 / Pi / 派  →  Physical Intelligence (Pi)
+hi world / AGIBOT  →  AgiBot World（智元开源数据集）
+group one          →  Groot One（英伟达具身基础模型）
+sharp              →  Sharp Robotics
+figure             →  Figure AI
+```
+
+**注意**：搜索时要找**权威来源**（官网、新闻、财经媒体），不要凭模型记忆猜测。
+
+### 步骤四：预览文本对背景调研的价值
+
+即使 SenseVoice 预览有音译错误，它仍能告诉你：
+
+- ✅ 录音的话题方向（具身智能/机器人数据）
+- ✅ 提到的公司类型（人形机器人、数据采集）
+- ✅ 技术路线（仿真、遥操、动捕、视频）
+- ✅ 大致的时间结构和内容分布
+- ⚠️ 具体人名/公司名需要搜索验证
+
+---
+
 ## Phase 3: 转录
 
 ### 运行转录脚本
 
 ```bash
-python3 scripts/transcribe_qwen3_asr.py "录音.mp3" [options]
+python transcribe_qwen3_asr.py "录音.mp3" [options]
 ```
 
 **选项：**
@@ -190,16 +321,16 @@ python3 scripts/transcribe_qwen3_asr.py "录音.mp3" [options]
 
 ```bash
 # 基本用法（自动检测GPU）
-python3 scripts/transcribe_qwen3_asr.py "录音.mp3"
+python transcribe_qwen3_asr.py "录音.mp3"
 
 # 指定 Intel XPU
-python3 scripts/transcribe_qwen3_asr.py "录音.mp3" -d "xpu:0"
+python transcribe_qwen3_asr.py "录音.mp3" -d "xpu:0"
 
 # 指定 Apple MPS
-python3 scripts/transcribe_qwen3_asr.py "录音.mp3" -d "mps"
+python transcribe_qwen3_asr.py "录音.mp3" -d "mps"
 
 # 恢复中断的转录（自动读取 checkpoint）
-python3 scripts/transcribe_qwen3_asr.py "录音.mp3" -o "之前的输出.txt"
+python transcribe_qwen3_asr.py "录音.mp3" -o "之前的输出.txt"
 ```
 
 ### 输出格式
@@ -222,6 +353,8 @@ python3 scripts/transcribe_qwen3_asr.py "录音.mp3" -o "之前的输出.txt"
 ## Phase 4: 整理精炼版
 
 > **这是本 skill 最核心的部分**。详细指南见 `references/精炼版整理指南.md`。
+>
+> ⚠️ **重要**：整理前必须先执行 Phase 2.5 背景调研，建立专有名词表。整理时对照修正ASR识别错误，不确定的标注[待确认]，末尾附ASR识别校正表。
 
 ### 4.1 核心原则
 
@@ -455,6 +588,7 @@ ffprobe -i 音频.mp3 -show_entries format=duration -v quiet -of csv="p=0"
 |------|------|
 | 格式 | Markdown (.md)，**不交付 .txt 版本** |
 | 文件 | `{标题}_精炼版.md` + `{标题}_原始转录.md` |
+| 标题生成 | **禁止用 B 站视频 ID（如 BVxxx）作为文件名**。应从音频内容提取：时间（YYYY年MM月DD日）+ 节目类型（大摩直播/播客/访谈/电话会议等）+ 人物（嘉宾姓名+机构/职位）+ 内容主题（核心议题） |
 | 标题格式 | `时间 + 节目类型 + 人物 + 内容主题` |
 | 标题示例 | `2026年3月26日 · 小俊访谈 · 罗福莉（小米大模型负责人）——AI范式巨变与后训练新范式` |
 | 原始转录 | 将 .txt 复制为 .md，不做修改 |
@@ -478,8 +612,9 @@ ffprobe -i 音频.mp3 -show_entries format=duration -v quiet -of csv="p=0"
 
 | 脚本 | 用途 |
 |------|------|}
-| `scripts/download_audio.py` | 音频下载（B站/网盘/直链，自动识别来源） |
-| `scripts/transcribe_qwen3_asr.py` | Qwen3-ASR 转录主脚本 |
+| `download_audio.py` | 音频下载（B站/网盘/直链，自动识别来源） |
+| `scripts/transcribe_sensevoice.py` | SenseVoice-Small 快速预览（Phase 2.5a，用于指导精准调研） |
+| `transcribe_qwen3_asr.py` | Qwen3-ASR 精校转录（Phase 3，高精度） |
 
 ## 参考文档
 
@@ -531,13 +666,63 @@ ffprobe -i 音频.mp3 -show_entries format=duration -v quiet -of csv="p=0"
   - 在 skill 文档和 prompt 中明确标注：建议使用 GPU，CPU 速度约 1x 实时率
   - Intel XPU 用户需确认 `intel-extension-for-pytorch` 已安装
 
-### 教训五：专有名词准确率
+### 教训五：专有名词校对（⚠️ 血泪教训，2026年5月12日更新）
 
-- **现象**：ASR 对人名、公司名、技术术语识别错误，精炼版延续错误
-- **正确做法**：
-  - 转录前：用 WebSearch 搜索视频/音频涉及的关键人名、公司名、技术术语，建立专有名词表
-  - 转录后：用专有名词表对照原始转录，修正明显的 ASR 同音字错误
-  - 精炼版整理时：遇到不确定的专有名词，标注 `[待确认]` 而不是猜测
+- **现象**：ASR 对人名、公司名、产品名、技术术语识别错误，精炼版延续错误，导致大量错别字
+- **正确做法**：转录前必须执行背景调研，搜索确认专有名词
+- **典型错误案例**（2026年5月12日 杰富瑞闭门会转录，已通过搜索验证）：
+
+| ASR识别 | 正确名称 | 备注 |
+|---------|----------|------|
+| "Happy Horse AI" | **快乐小马 (HappyHorse)** | 阿里巴巴ATH产品，2026年4月发布 |
+| "Clean AI" | **可灵AI (Kling)** | 快手产品 |
+| "C Dance" | **即梦 (Dreamina)** | 字节跳动产品 |
+| "Jape" | **智谱GLM-5.1** | 智谱AI产品（上下文提到"GLM 5.1"） |
+| "JPod" | **阶跃星辰** | 上下文提到"Step系列" |
+| "GAIPU / Zepu" | **腾讯混元团队** | 技术分享部分，来源为腾讯 |
+| "Hi3" / "HY3" | **混元Hy3** | 腾讯大模型3.0英文代号（Hunyuan Hy3） |
+| 数字/英文混合 | K2.6、K two point six | 统一为 **Kimi K2.6** |
+
+#### ⭐ 转录前必须执行的背景调研（强制步骤）
+
+**在下载音频后、转录开始前，必须先搜索相关领域的背景信息**：
+
+1. **搜索关键词**：
+   - 视频/音频的主题（如"杰富瑞 中国互联网 AI"）
+   - 视频中提到的公司名（如"快乐小马"、"可灵AI"、"即梦"、"混元Hy3"）
+   - 视频中提到的人名（搜索确认正确拼写）
+   - 技术术语和产品名称
+
+2. **建立专有名词对照表**：
+   ```
+   ASR可能识别为 → 正确名称
+   Happy Horse AI → 快乐小马 (HappyHorse)
+   Clean AI → 可灵AI (Kling)
+   C Dance → 即梦 (Dreamina)
+   Jape → 智谱GLM-5.1
+   GAIPU/Zepu → 腾讯混元团队
+   Hi3 → 混元Hy3
+   ```
+
+3. **搜索工具**：
+   - 用 `WebSearch` 搜索权威来源（官网、新闻、财经媒体）
+   - 不要凭模型记忆猜测，要找实际证据
+   - 特别注意：很多"查无此名"的实际上可能是真实产品（如HappyHorse）
+
+4. **精炼版整理时**：
+   - 对照专有名词表修正明显的 ASR 同音字错误
+   - 遇到不确定的专有名词，**必须标注 `[待确认]`** 而不是猜测
+   - 在精炼版末尾附上 **ASR识别校正表**，列出所有被修正的专有名词
+
+#### 常见ASR错误类型
+
+| 错误类型 | 示例 | 修正 |
+|----------|------|------|
+| 英文音译错误 | "Happy Horse" | 快乐小马 (HappyHorse) |
+| 品牌名混淆 | "Clean AI" | 可灵AI (Kling) |
+| 拼音首字母 | "C Dance" | 即梦 (Dreamina) |
+| 产品代号 | "Hi3" | 混元Hy3 |
+| 数字+英文混合 | "K two point six" | K2.6 |
 
 ### 教训六：精炼版不是摘要，是再整理
 
@@ -557,16 +742,67 @@ ffprobe -i 音频.mp3 -show_entries format=duration -v quiet -of csv="p=0"
   - 使用 `deliver_attachments` 工具一次性交付两个文件（精炼版 + 原始转录）
   - 文头元信息完整：转录模型、转录时间、设备、音频时长、段数、完整性状态
 
+### 教训八：背景调研不能盲猜，必须用 SenseVoice 预览驱动（⭐ 2026-05-15 新增）
+
+- **现象**：根据视频标题/元信息盲猜关键词去搜索，导致"智元"写成"智源"、"Sharp"搜不到
+- **根因**：在不知道录音具体内容的情况下，只能靠预训练知识猜测；很多专有名词不在预训练数据中
+- **正确做法**：Phase 2.5a 先用 SenseVoice-Small 跑一遍预览（32秒完成39分钟），Phase 2.5b 从预览文本中提取陌生词汇，再精准搜索验证
+
+**实战数据**（2026-05-15，BV1uQ5Y6mExN，39分钟）：
+
+| 指标 | 数值 |
+|------|------|
+| SenseVoice 预览耗时 | **32秒**（XPU，70x 实时率） |
+| Qwen3-ASR 精校耗时 | **112秒**（20.8x 实时率） |
+| 预览速度 vs 精校 | 快 **3.5倍** |
+| 关键词识别（智元） | 预览文本有"志源" → 搜索确认"智元" |
+| 关键词识别（Physical Intelligence） | 预览文本有"物理智能"/"派" → 搜索确认 |
+
+**SenseVoice 预览的常见音译偏差模式**：
+
+| 预览文本（ASR） | 正确名称 | 偏差类型 |
+|---------------|---------|---------|
+| 志源 | 智元机器人 | 智/志混淆 |
+| 物理智能 / 派 | Physical Intelligence (Pi) | 意译/音译 |
+| hi world / agi world | AgiBot World | 音节丢失 |
+| group one | Groot One | 语义相近 |
+| sharp | Sharp Robotics | 首字母大写丢失 |
+| 志得 / 吉得 | GID（通用具身智能数据平台）[待确认] | 需二次验证 |
+
+> **核心原则**：预览文本是**信息来源**，不是精确转录。可以用它识别话题方向和提取关键词，但具体人名/公司名必须通过搜索确认。
+
 ### 快速检查清单（每次交付前）
 
 - [ ] 原始转录段数 = grep -c '^\[' 原始转录.md
 - [ ] 精炼版时间覆盖 = 文头标注的覆盖区间
 - [ ] 精炼版最后一章时间戳 ≈ 音频结尾（误差 <30秒）
 - [ ] 所有章节标题的时间标签已核对（grep '^##' 精炼版.md）
-- [ ] 专有名词已对照专有名词表修正
+- [ ] **⭐ 专有名词已通过搜索确认并修正**（不能用模型记忆，必须搜索验证）
+- [ ] **⭐ 不确定的专有名词标注了 [待确认]**
+- [ ] **⭐ 精炼版末尾附有 ASR识别校正表**
 - [ ] 交付文件为 .md 格式（非 .txt）
-- [ ] 标题格式符合规范
+- [ ] 标题格式符合规范（禁止使用 B 站视频 ID 作为文件名）
 - [ ] 文头元信息完整
+
+### 教训九：文件名必须用标题而非视频 ID（⭐ 2026-05-15 新增）
+
+- **现象**：转录完成后用 B 站视频 ID（如 `BV13G556aE2b`）作为文件名，导致文件名没有信息量，用户难以识别内容
+- **根因**：skill 交付规范只说了标题格式，没说清楚"标题"从哪里来，容易直接用 URL 或文件名中的 ID
+- **正确做法**：
+  1. 转录完成后，从音频内容（精炼版章节标题、文头元信息、参会人物）中提取四个要素
+  2. 拼装为规范标题：`YYYY年MM月DD日 + 节目类型 + 人物 + 内容主题`
+  3. 文件名 = `规范标题_精炼版.md` 和 `规范标题_原始转录.md`
+  4. 绝对禁止用 B 站视频 ID、URL 片段、或时间戳作为文件名主干
+- **文件名命名检查**（交付前必须执行）：
+  ```bash
+  # ❌ 错误：使用了视频ID
+  BV13G556aE2b_精炼版.md
+  https___b23.tv_xxx_精炼版.md
+  audio_20260515_精炼版.md
+
+  # ✅ 正确：使用规范标题
+  2026年5月13日_大摩直播_张雷（基础材料）×徐然（Richard_中银金融首席）×侯颖——周期论剑：AI超级周期与中国经济新格局_精炼版.md
+  ```
 
 ## 脚本开发与调试教训（2026-05-11 更新）
 
@@ -622,4 +858,33 @@ ffprobe -i 音频.mp3 -show_entries format=duration -v quiet -of csv="p=0"
 - [ ] 用 `python -c "import ast; ast.parse(...)"` 做语法检查
 - [ ] 长任务输出到文件，不用 `| head`
 - [ ] `print()` 加 `flush=True` 或用 `python -u`
+
+### 教训六：脚本文件实际位置与 SKILL.md 文档不符（⭐ 2026-05-15 新增）
+
+**现象**：SKILL.md 中写 `scripts/transcribe_qwen3_asr.py` 和 `scripts/download_audio.py`，但实际文件在 skill 根目录，导致运行失败。
+
+**实际文件位置（2026-05-15 验证）**：
+
+| 脚本 | SKILL.md 写的位置 | 实际位置 |
+|------|------------------|---------|
+| `download_audio.py` | `scripts/download_audio.py` ❌ | **skill 根目录** ✅ |
+| `transcribe_qwen3_asr.py` | `scripts/transcribe_qwen3_asr.py` ❌ | **skill 根目录** ✅ |
+| `transcribe_sensevoice.py` | `scripts/transcribe_sensevoice.py` | **scripts/** ✅（正确） |
+
+**正确命令**：
+```bash
+# 下载（skill根目录）
+python download_audio.py "<URL>" -o "录音.mp3"
+
+# SenseVoice 预览（scripts/ 子目录）
+python scripts/transcribe_sensevoice.py "录音.mp3" -o "录音_preview.txt"
+
+# Qwen3-ASR 精校（skill根目录）
+python transcribe_qwen3_asr.py "录音.mp3" -o "录音_qwen3asr.txt"
+```
+
+**正确做法**：
+1. 写完 SKILL.md 后，用 `ls skill目录/` 和 `ls skill目录/scripts/` 验证所有脚本路径
+2. 文档中的路径必须与实际文件位置一一对应，不能假设"都在 scripts/ 下"
+3. 脚本结构应尽量统一（建议全部放在 scripts/ 下，或全部放在根目录），避免混淆
 

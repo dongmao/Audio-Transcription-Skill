@@ -267,6 +267,8 @@ def main():
                         help="禁用重叠去重（逐片独立转录）")
     parser.add_argument("--language", default="Chinese", help="识别语言 (默认: Chinese)")
     parser.add_argument("--max-new-tokens", type=int, default=2048, help="最大生成 token 数")
+    parser.add_argument("--start-index", type=int, default=None, help="起始分片索引（用于只转录部分内容）")
+    parser.add_argument("--end-index", type=int, default=None, help="结束分片索引（用于只转录部分内容）")
     args = parser.parse_args()
 
     if not os.path.exists(args.audio):
@@ -355,13 +357,20 @@ def main():
             results[r["index"]] = r["text"]
         print(f"[断点] 恢复: {len(done_indices)}/{len(segments)} 已完成")
 
+    # ─── 起始/结束索引处理 ──────────────────────────────────────
+    start_idx = args.start_index if args.start_index is not None else 0
+    end_idx = args.end_index if args.end_index is not None else len(segments)
+    
+    # 强制跳过已完成的分片（只处理指定范围）
+    pending = [s for s in segments if start_idx <= s["index"] < end_idx and s["index"] not in done_indices]
+    
+    if args.start_index is not None or args.end_index is not None:
+        print(f"[范围] 指定转录: {start_idx}-{end_idx} (共 {end_idx - start_idx} 片)")
+
     # ─── 逐批转录 ──────────────────────────────────────────────
     total = len(segments)
     failed_count = 0
     t_start = time.time()
-
-    # 只处理未完成的分片
-    pending = [s for s in segments if s["index"] not in done_indices]
 
     for batch_start in range(0, len(pending), batch_size):
         batch_items = pending[batch_start:batch_start + batch_size]
@@ -412,8 +421,9 @@ def main():
     output_lines = []
     prev_text = ""
     step_sec = args.segment_len - args.overlap  # 逻辑步长
-
-    for i in range(len(segments)):
+    
+    # 只处理指定范围内的segments
+    for i in range(start_idx, end_idx):
         text = results.get(i, "")
         if not text:
             # 转录失败的片段
@@ -422,7 +432,7 @@ def main():
             prev_text = ""
             continue
 
-        if args.no_overlap_dedup or i == 0:
+        if args.no_overlap_dedup or i == start_idx:
             clean_text = text
         else:
             clean_text = overlap_deduplicate(prev_text, text, args.overlap, args.segment_len)
