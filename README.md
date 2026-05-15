@@ -9,7 +9,8 @@
 | 特性 | 说明 |
 |------|------|
 | 🌐 **全来源覆盖** | B站视频、极空间/百度/阿里云盘分享、HTTP直链、本地文件 |
-| 🧠 **Qwen3-ASR 转录** | 中文识别精度最高，1.7B 小模型 GPU 高效推理 |
+| ⚡ **SenseVoice 预览** | ~200M 小模型，Intel Arc 140V 实测 **~70x 实时率**，32秒完成39分钟音频 |
+| 🎯 **Qwen3-ASR 精校** | 中文识别精度最高，1.7B 小模型 GPU 高效推理，~17-22x 实时率 |
 | 📝 **精炼版整理** | 按主题重组 + 口语清理 + 信息分层 + 关键数据速览 |
 | 🔗 **智能重叠去重** | 分片尾部 5s 重叠，避免句子断裂，自动拼接 |
 | ♻️ **断点续传** | 长音频中断后可继续，不重复劳动 |
@@ -21,17 +22,23 @@
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│  Step 1: 获取音频                                            │
-│  B站 → yt-dlp | 网盘 → Playwright+Edge | 直链 → curl       │
+│  Phase 1: 获取音频                                            │
+│  B站 → yt-dlp | 网盘 → Playwright+Edge | 直链 → curl        │
 └──────────────────────────┬──────────────────────────────────┘
                            ▼
 ┌─────────────────────────────────────────────────────────────┐
-│  Step 2: 语音转文字（Qwen3-ASR-1.7B, 必须 GPU）              │
-│  智能分片(30s+5s重叠) → 批量推理 → 断点续传 → 重叠去重拼接   │
+│  Phase 2.5a: SenseVoice 快速预览（可选，推荐）               │
+│  ~200M 模型 | Intel Arc ~70x 实时率 | 32秒完成39分钟音频    │
+│  → 获取全文章内容 → 精准调研背景知识                         │
 └──────────────────────────┬──────────────────────────────────┘
                            ▼
 ┌─────────────────────────────────────────────────────────────┐
-│  Step 3: 生成精炼版（AI 整理）                                │
+│  Phase 3: Qwen3-ASR 精校转录（必须 GPU）                    │
+│  智能分片(30s+5s重叠) → 批量推理 → 断点续传 → 重叠去重拼接  │
+└──────────────────────────┬──────────────────────────────────┘
+                           ▼
+┌─────────────────────────────────────────────────────────────┐
+│  Phase 4: 生成精炼版（AI 整理）                              │
 │  话题分章 → 口语清理 → 信息分层 → 表格/列表 → 完整性验证     │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -83,7 +90,7 @@ python -c "from playwright.sync_api import sync_playwright; print('playwright OK
 
 ## 📖 使用方法
 
-### Step 1: 下载音频
+### Phase 1: 下载音频
 
 ```bash
 # B站视频
@@ -98,7 +105,38 @@ python download_audio.py "https://example.com/audio.mp3" -o "output.mp3"
 # 本地文件（直接跳过下载步骤）
 ```
 
-### Step 2: 语音转文字
+### Phase 2.5a: SenseVoice 快速预览（推荐）
+
+**不要盲猜关键词，先听一遍内容。** 用 SenseVoice 小模型快速获取全文章内容，再精准调研背景知识。
+
+| 属性 | 值 |
+|------|------|
+| 模型 | `iic/SenseVoiceSmall`（阿里 FunAudioLLM） |
+| 参数量 | ~200M |
+| 速度（Intel Arc 140V XPU） | **~70x 实时率**，39分钟音频约 32-35 秒 |
+| 速度（CPU） | ~20x 实时率，39分钟约 2 分钟 |
+| 精度 | 优于同等量级 Whisper，但不如 Qwen3-ASR-1.7B |
+
+```bash
+# 自动检测设备（XPU/CUDA/CPU）
+python scripts/transcribe_sensevoice.py "录音.mp3" -o "录音_preview.txt"
+```
+
+> **注意**：`scripts/transcribe_sensevoice.py` 在 `scripts/` 子目录，不在 skill 根目录。
+
+### Phase 2.5b: 预览文本驱动的精准调研
+
+用预览文本提取陌生词汇（英文专有名词、疑似音译的人名/公司名），然后精准搜索验证，建立专有名词对照表：
+
+```
+ASR预览可能识别 → 正确名称
+志源 → 智元机器人
+物理智能 / 派 → Physical Intelligence (Pi)
+hi world / agi world → AgiBot World
+group one → Groot One
+```
+
+### Phase 3: Qwen3-ASR 精校转录
 
 ```bash
 # 基本用法（自动检测 GPU）
@@ -115,6 +153,9 @@ python transcribe_qwen3_asr.py "output.mp3" -d "mps"
 
 # 自定义分片和输出
 python transcribe_qwen3_asr.py "output.mp3" -s 25 --overlap 3 -o "转录结果.txt"
+
+# 中断后断点续传（输出路径一致即可）
+python transcribe_qwen3_asr.py "output.mp3" -o "之前的输出.txt"
 ```
 
 **转录参数：**
@@ -133,14 +174,17 @@ python transcribe_qwen3_asr.py "output.mp3" -s 25 --overlap 3 -o "转录结果.t
 
 **性能参考：**
 
-| 设备 | 音频时长 | 转录耗时 | 实时率 |
-|------|---------|---------|--------|
-| Intel Arc 140V (16GB) | 59min | 3.1min | ~19x |
-| NVIDIA RTX 4090 | 59min | ~3min | ~20x |
-| Apple M1/M2/M3 (MPS) | 59min | ~8-12min | ~5-7x |
-| CPU (i7) | 59min | ~60min | ~1x ⚠️ |
+| 阶段 | 设备 | 音频时长 | 耗时 | 实时率 |
+|------|------|---------|------|--------|
+| SenseVoice 预览 | Intel Arc 140V (16GB) | 39min | ~32秒 | **~70x** |
+| Qwen3-ASR 精校 | Intel Arc 140V (16GB) | 42min | ~2分钟 | ~17-22x |
+| Qwen3-ASR 精校 | NVIDIA RTX 4090 | 59min | ~3min | ~20x |
+| Qwen3-ASR 精校 | Apple M1/M2/M3 (MPS) | 59min | ~8-12min | ~5-7x |
+| Qwen3-ASR 精校 | CPU (i7) | 59min | ~60min | ~1x ⚠️ |
 
-### Step 3: 生成精炼版
+> ⚠️ **禁止纯 CPU 推理**。Intel Arc / NVIDIA CUDA / Apple MPS 任选其一。
+
+### Phase 4: 生成精炼版
 
 将原始转录交给 AI 整理为精炼版。详细方法论见 [`精炼版整理指南.md`](精炼版整理指南.md)。
 
@@ -150,6 +194,7 @@ python transcribe_qwen3_asr.py "output.mp3" -s 25 --overlap 3 -o "转录结果.t
 2. **信息密度优先**——表格只为更高密度，不为做而做
 3. **时间锚定**——每章标注原始音频时间区间 `【MM:SS-MM:SS】`
 4. **完整性可验证**——精炼版必须覆盖原始转录 100% 内容
+5. **专有名词必须校正**——ASR 可能将英文名词音译为错误中文，需搜索验证
 
 **精炼版 Prompt 模板：**
 
@@ -158,30 +203,94 @@ python transcribe_qwen3_asr.py "output.mp3" -s 25 --overlap 3 -o "转录结果.t
 
 ## 整理规则
 
-1. **文头**：写明转录模型、时长、段数、完整性验证状态；以及录音来源、性质、关键人物
+1. **文头**：写明转录模型、时长、段数、完整性验证状态；录音来源、性质、关键人物
 2. **章节**：按话题切换划分，每章标注时间区间【MM:SS-MM:SS】，中文数字编号
 3. **内容**：保留论证过程和关键原话，不只提炼结论；数字必须精确；清理口语冗余
 4. **表格**：对比、结构化数据、多维度并列时用表格；一句话能说清的不要硬做表格
 5. **信息分层**：核心结论 → 支撑论据 → 具体数据 → 背景上下文 → 待定事项
-6. **文末**：添加关键数据速览表（5-10个核心数据点）
-7. **验证**：完成后核对原始转录段数与精炼版时间覆盖，确认无遗漏
+6. **专有名词**：所有英文/专有名词需通过搜索确认正确中文名称，不确定时标注[待确认]
+7. **ASR校正表**：文末附上 ASR 预览文本 → 正确名称的对照表（Phase 2.5b 产出）
+8. **验证**：完成后核对原始转录段数与精炼版时间覆盖，确认无遗漏
 
 现在请整理以下原始转录：
 
 {粘贴原始转录内容}
 ```
 
+## 📛 交付文件名规范
+
+> ⭐ **禁止使用 B 站视频 ID（如 BVxxx）作为文件名**
+
+### 标题格式
+
+```
+时间 + 节目类型 + 人物 + 内容主题
+```
+
+### 标题示例
+
+```
+2026年3月26日 · 小俊访谈 · 罗福莉（小米大模型负责人）——AI范式巨变与后训练新范式
+```
+
+### 正确 vs 错误文件名
+
+| 类型 | 示例 |
+|------|------|
+| ✅ 正确 | `2026年5月13日_大摩直播_张雷×徐然×侯颖——周期论剑：AI超级周期与中国经济新格局_精炼版.md` |
+| ❌ 错误 | `BV13G556aE2b_精炼版.md` |
+| ❌ 错误 | `https___b23.tv_xxx_精炼版.md` |
+| ❌ 错误 | `audio_20260515_精炼版.md` |
+
+### 交付格式
+
+| 项目 | 要求 |
+|------|------|
+| 格式 | Markdown (`.md`)，**不交付 .txt 版本** |
+| 文件 | `{标题}_精炼版.md` + `{标题}_原始转录.md` |
+| 编码 | UTF-8 |
+
+## ✅ 快速检查清单
+
+交付前必执行以下检查：
+
+```bash
+# 1. 原始转录段数
+grep -c '^\[' 原始转录.md
+
+# 2. 精炼版时间覆盖
+grep -o '【[0-9:]*' 精炼版.md | sort -u
+
+# 3. 检查文件命名（禁止 BV ID）
+# ❌ BV13G556aE2b_精炼版.md
+# ✅ 2026年5月13日_大摩直播_张雷×徐然×侯颖——周期论剑_精炼版.md
+```
+
+| 序号 | 检查项 | 说明 |
+|------|--------|------|
+| [ ] | 原始转录段数 | `grep -c '^\[' 原始转录.md` |
+| [ ] | 精炼版时间覆盖区间 | 文头标注的覆盖区间 vs 音频总时长 |
+| [ ] | 精炼版最后一章时间戳 | 应接近音频结尾（误差 <30秒） |
+| [ ] | 专有名词已通过搜索确认并修正 | ASR 预览可能将英文名词音译错误 |
+| [ ] | 不确定的专有名词标注了 [待确认] | — |
+| [ ] | 文末附有 ASR 识别校正表 | 列出预览文本 → 正确名称的映射 |
+| [ ] | 交付文件为 .md 格式 | **禁止**交付 .txt 版本 |
+| [ ] | 标题格式符合规范 | **禁止**使用 B 站视频 ID |
+| [ ] | 文头元信息完整 | 转录模型、时长、段数、转录耗时 |
+
 ## 📂 项目结构
 
 ```
 Audio-Transcription-Skill/
 ├── README.md                       # 本文件
-├── SKILL.md                        # WorkBuddy Skill 描述文件（本地安装时放在 ~/.workbuddy/skills/audio-transcription/）
+├── SKILL.md                        # WorkBuddy Skill 描述文件
 ├── requirements.txt                 # Python 依赖
 ├── .gitignore
 ├── LICENSE                         # MIT License
-├── download_audio.py               # 音频下载脚本（B站/网盘/直链）
-├── transcribe_qwen3_asr.py         # Qwen3-ASR 转录脚本
+├── download_audio.py                # 音频下载脚本（B站/网盘/直链）
+├── transcribe_qwen3_asr.py          # Qwen3-ASR 精校转录脚本
+├── scripts/
+│   └── transcribe_sensevoice.py    # SenseVoice 快速预览脚本（Phase 2.5a）
 └── 精炼版整理指南.md                # 精炼版整理完整方法论 + Prompt 模板
 ```
 
@@ -222,6 +331,23 @@ with sync_playwright() as p:
 > **关键**：`channel="msedge"` 调用系统 Edge 浏览器，无需额外下载 Chromium。
 > 适用于极空间、百度网盘、阿里云盘等所有需要 JS 渲染的分享页。
 
+### 专有名词校对（血泪教训）
+
+SenseVoice 预览会将英文名词音译为中文。典型错误案例：
+
+| ASR预览识别 | 正确名称 | 备注 |
+|------------|---------|------|
+| "Happy Horse AI" | **快乐小马 (HappyHorse)** | 阿里巴巴 ATH 产品，2026年4月发布 |
+| "Clean AI" | **可灵AI (Kling)** | 快手产品 |
+| "C Dance" | **即梦 (Dreamina)** | 字节跳动产品 |
+| "Jape" | **智谱GLM-5.1** | 智谱AI产品 |
+| "Hi3" / "HY3" | **混元Hy3** | 腾讯大模型3.0代号 |
+| 志源 | **智元机器人** | 智/志混淆 |
+| 物理智能 / 派 | **Physical Intelligence (Pi)** | 意译/音译 |
+| hi world / agi world | **AgiBot World** | 音节丢失 |
+
+> **核心原则**：预览文本是信息来源，不是精确转录。所有英文/专有名词必须通过搜索确认。
+
 ### 完整性验证流程
 
 转录和精炼完成后，自动执行验证：
@@ -235,11 +361,10 @@ with sync_playwright() as p:
 
 | 问题 | 解决方案 |
 |------|---------|
-| ffmpeg 未找到 | `winget install ffmpeg` |
+| ffmpeg 未找到 | `winget install ffmpeg` (Windows) / `brew install ffmpeg` (macOS) |
 | GPU 不可用 (Intel) | `pip install intel-extension-for-pytorch -i https://mirrors.aliyun.com/pypi/simple/` |
 | GPU 不可用 (NVIDIA) | `pip install torch --index-url https://download.pytorch.org/whl/cu121` |
 | GPU 不可用 (Apple MPS) | 确保 PyTorch ≥ 2.0，macOS ≥ 12.3，Apple Silicon Mac |
-| ffmpeg 未找到 (macOS) | `brew install ffmpeg` |
 | Playwright 网盘下载失败 | 确认有 Edge 浏览器，使用 `channel="msedge"` |
 | 模型下载慢/失败 | 使用 ModelScope 镜像：`modelscope download Qwen/Qwen3-ASR-1.7B` |
 | 转录中断 | 直接重新运行相同命令，自动从 checkpoint 恢复 |
@@ -261,5 +386,6 @@ MIT License - 详见 [LICENSE](LICENSE) 文件
 ## 🙏 致谢
 
 - [Qwen3-ASR](https://modelscope.cn/models/Qwen/Qwen3-ASR-1.7B) - 阿里通义千问语音识别模型
+- [SenseVoice](https://github.com/FunAudioLLM/SenseVoice) - 阿里 FunAudioLLM 快速预览模型
 - [Playwright](https://playwright.dev/python/) - 浏览器自动化
 - [yt-dlp](https://github.com/yt-dlp/yt-dlp) - 视频下载工具
